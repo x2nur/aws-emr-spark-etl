@@ -1,0 +1,240 @@
+{
+    "StartAt": "Check for updates",
+    "States": {
+      "Check for updates": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": {
+          "Payload.$": "$",
+          "FunctionName.$": "$.chk_upd_arn"
+        },
+        "Retry": [
+          {
+            "ErrorEquals": [
+              "Lambda.ServiceException",
+              "Lambda.AWSLambdaException",
+              "Lambda.SdkClientException",
+              "Lambda.TooManyRequestsException"
+            ],
+            "IntervalSeconds": 1,
+            "MaxAttempts": 3,
+            "BackoffRate": 2
+          }
+        ],
+        "Next": "Choice",
+        "OutputPath": "$.Payload"
+      },
+      "Choice": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Variable": "$.nodata",
+            "BooleanEquals": true,
+            "Next": "No updates"
+          }
+        ],
+        "Default": "Create Spark App"
+      },
+      "No updates": {
+        "Type": "Pass",
+        "End": true
+      },
+      "Create Spark App": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::emr-serverless:createApplication.sync",
+        "Parameters": {
+          "Name": "Sales-ETL",
+          "Type": "SPARK",
+          "ReleaseLabel": "emr-7.1.0",
+          "InitialCapacity": {
+            "DRIVER": {
+              "WorkerConfiguration": {
+                "Cpu": "1",
+                "Memory": "2",
+                "Disk": "20gb"
+              },
+              "WorkerCount": 1
+            },
+            "EXECUTOR": {
+              "WorkerConfiguration": {
+                "Cpu": "1",
+                "Memory": "2",
+                "Disk": "20gb"
+              },
+              "WorkerCount": 1
+            }
+          },
+          "RuntimeConfiguration": [
+            {
+              "Classification": "spark-defaults",
+              "Properties": {
+                "spark.jars": "/usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar,/usr/share/aws/aws-java-sdk-v2/*.jar,/usr/share/aws/hmclient/lib/*.jar",
+                "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+                "spark.hadoop.hive.metastore.client.factory.class": "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                "spark.sql.catalog.dev": "org.apache.iceberg.spark.SparkCatalog",
+                "spark.sql.catalog.dev.warehouse.$": "$.dwh_path",
+                "spark.sql.catalog.dev.catalog-impl": "org.apache.iceberg.aws.glue.GlueCatalog",
+                "spark.sql.catalog.dev.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+              }
+            },
+            {
+              "Classification": "spark-driver-log4j2",
+              "Properties": {
+                "rootLogger.level": "error"
+              }
+            }
+          ],
+          "MonitoringConfiguration": {
+            "CloudWatchLoggingConfiguration": {
+              "Enabled": true
+            }
+          }
+        },
+        "Next": "Start Spark App",
+        "ResultPath": "$.spark",
+        "ResultSelector": {
+          "ApplicationId.$": "$.ApplicationId"
+        }
+      },
+      "Start Spark App": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::emr-serverless:startApplication.sync",
+        "Parameters": {
+          "ApplicationId.$": "$.spark.ApplicationId"
+        },
+        "Next": "Parallel",
+        "ResultPath": null
+      },
+      "Parallel": {
+        "Type": "Parallel",
+        "Next": "Stop Spark App (Success)",
+        "Branches": [
+          {
+            "StartAt": "User ETL Job",
+            "States": {
+              "User ETL Job": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+                "Parameters": {
+                  "ApplicationId.$": "$.spark.ApplicationId",
+                  "ExecutionRoleArn.$": "$.emr_role_arn",
+                  "JobDriver": {
+                    "SparkSubmit": {
+                      "EntryPoint.$": "$.scripts.users_etl",
+                      "EntryPointArguments.$": "States.Array($.data.users_csv)"
+                    }
+                  }
+                },
+                "ResultPath": null,
+                "Next": "Product ETL Job"
+              },
+              "Product ETL Job": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+                "Parameters": {
+                  "ApplicationId.$": "$.spark.ApplicationId",
+                  "ExecutionRoleArn.$": "$.emr_role_arn",
+                  "JobDriver": {
+                    "SparkSubmit": {
+                      "EntryPoint.$": "$.scripts.products_etl",
+                      "EntryPointArguments.$": "States.Array($.data.products_csv)"
+                    }
+                  }
+                },
+                "Next": "Order ETL Job",
+                "ResultPath": null
+              },
+              "Order ETL Job": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+                "Parameters": {
+                  "ApplicationId.$": "$.spark.ApplicationId",
+                  "ExecutionRoleArn.$": "$.emr_role_arn",
+                  "JobDriver": {
+                    "SparkSubmit": {
+                      "EntryPoint.$": "$.scripts.orders_etl",
+                      "EntryPointArguments.$": "States.Array($.data.orders_csv)"
+                    }
+                  }
+                },
+                "ResultPath": null,
+                "Next": "Calendar ETL Job"
+              },
+              "Calendar ETL Job": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+                "Parameters": {
+                  "ApplicationId.$": "$.spark.ApplicationId",
+                  "ExecutionRoleArn.$": "$.emr_role_arn",
+                  "JobDriver": {
+                    "SparkSubmit": {
+                      "EntryPoint.$": "$.scripts.calendar_etl"
+                    }
+                  }
+                },
+                "ResultPath": null,
+                "Next": "Commit ETL main"
+              },
+              "Commit ETL main": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName.$": "$.cmt_etl_arn",
+                  "Payload": {
+                    "processed_date.$": "$.date"
+                  }
+                },
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "Lambda.ServiceException",
+                      "Lambda.AWSLambdaException",
+                      "Lambda.SdkClientException",
+                      "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                  }
+                ],
+                "End": true,
+                "ResultPath": null
+              }
+            }
+          }
+        ],
+        "Catch": [
+          {
+            "ErrorEquals": [
+              "States.ALL"
+            ],
+            "Next": "Stop Spark App",
+            "ResultPath": "$.Error"
+          }
+        ],
+        "ResultPath": null
+      },
+      "Stop Spark App": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::emr-serverless:stopApplication.sync",
+        "Parameters": {
+          "ApplicationId.$": "$.spark.ApplicationId"
+        },
+        "Next": "Fail"
+      },
+      "Fail": {
+        "Type": "Fail"
+      },
+      "Stop Spark App (Success)": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::emr-serverless:stopApplication.sync",
+        "Parameters": {
+          "ApplicationId.$": "$.spark.ApplicationId"
+        },
+        "Next": "Success"
+      },
+      "Success": {
+        "Type": "Succeed"
+      }
+    }
+  }
