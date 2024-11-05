@@ -2,7 +2,7 @@
 # Apache Spark processing on AWS EMR (Serverless) with AWS Step Functions orchestration and CDK deployment
 
 
-![data pipeline scheme](/data_pipeline_scheme.svg)
+<img src="/data_pipeline_scheme.svg" width=50%>
 
 
 ## Usage
