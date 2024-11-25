@@ -13,6 +13,7 @@ This project utilizes the following AWS services:
 - S3
 - Glue Data Catalog
 - Event Bridge
+- DynamoDB
 
 #### Usage
 
